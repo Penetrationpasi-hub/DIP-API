@@ -158,6 +158,22 @@ REGIERUNGSFRAKTIONEN = {
 FRAKTIONEN = ["CDU/CSU", "SPD", "Gruene", "FDP", "AfD", "Linke", "BSW",
               "Mehrere Fraktionen"]
 
+# Parteifarben fuer alle Diagramme. Ohne diese Zuordnung vergibt Excel
+# Standardfarben in Reihenfolge der Zeilen - dann ist die AfD gruen und
+# die Gruenen sind rot, was bei einer Parteiengrafik zu Fehllesungen fuehrt.
+PARTEIFARBEN = {
+    "CDU/CSU": "1A1A1A",
+    "SPD": "E3000F",
+    "Gruene": "1AA037",
+    "FDP": "FFCC00",
+    "AfD": "009EE0",
+    "Linke": "BE3075",
+    "BSW": "7D2181",
+    "Mehrere Fraktionen": "9E9E9E",
+    "Bundesregierung": "5A6B7B",
+    "Ausschuesse": "B9BFC6",
+}
+
 
 # ---------------------------------------------------------------- Zugangsdaten
 
@@ -685,6 +701,14 @@ def write_excel(rows, abstimmungen=None):
                        if any(r.get("typ") == t for r in rows)]
     frakt_vorhanden = [f for f in FRAKTIONEN
                        if any(r.get("fraktion") == f for r in rows)]
+    # Fraktionen ohne eigene Initiative ans Ende, damit die Torte keine
+    # Null-Segmente mit ueberlappender Beschriftung zeigt.
+    def _init_zahl(f):
+        return sum(1 for r in rows if r.get("fraktion") == f
+                   and r.get("typ") in INITIATIV_TYPEN)
+    frakt_mit_init = [f for f in frakt_vorhanden if _init_zahl(f) > 0]
+    frakt_vorhanden = frakt_mit_init + [f for f in frakt_vorhanden
+                                        if f not in frakt_mit_init]
 
     wi = wb.create_sheet("Initiativen")
     wi["A1"] = "Eigene Initiativen je Fraktion"
@@ -929,6 +953,7 @@ def write_excel(rows, abstimmungen=None):
     # ------------------------------------------------ Diagramme
     from openpyxl.chart import BarChart, LineChart, PieChart, Reference
     from openpyxl.chart.label import DataLabelList
+    from openpyxl.chart.marker import DataPoint
 
     def stil(ch, titel, hoehe=9.5, breite=20):
         ch.title = titel
@@ -953,15 +978,27 @@ def write_excel(rows, abstimmungen=None):
     wi.add_chart(ch1, f"A{sumrow + 3}")
 
     # 1b) Initiativen: Torte, Anteil der Fraktionen am Gesamtaufkommen
+    # Nur Fraktionen mit mindestens einer Initiative, sonst haengen
+    # Null-Prozent-Beschriftungen im Titel.
+    ende_torte = 4 + len(frakt_mit_init)
     ch1b = PieChart()
     ch1b.add_data(Reference(wi, min_col=n_typ + 3,
-                            min_row=4, max_row=sumrow - 1),
+                            min_row=4, max_row=ende_torte),
                   titles_from_data=True)
     ch1b.set_categories(Reference(wi, min_col=1, min_row=5,
-                                  max_row=sumrow - 1))
+                                  max_row=ende_torte))
     ch1b.dataLabels = DataLabelList()
     ch1b.dataLabels.showPercent = True
     ch1b.dataLabels.showCatName = True
+    ch1b.dataLabels.showVal = True
+    ch1b.dataLabels.showSerName = False
+    ch1b.dataLabels.showLegendKey = False
+    # Jedes Segment in der Farbe seiner Partei.
+    for idx, f in enumerate(frakt_mit_init):
+        pt = DataPoint(idx=idx)
+        pt.graphicalProperties.solidFill = PARTEIFARBEN.get(f, "9E9E9E")
+        pt.graphicalProperties.line.solidFill = "FFFFFF"
+        ch1b.series[0].data_points.append(pt)
     stil(ch1b, "Anteil der Fraktionen an allen Initiativen",
          hoehe=10, breite=15)
     wi.add_chart(ch1b, f"A{sumrow + 24}")
@@ -977,6 +1014,9 @@ def write_excel(rows, abstimmungen=None):
     kats = Reference(wz, min_col=1, min_row=4, max_row=letzte_q)
     ch2.add_data(daten, titles_from_data=True)
     ch2.set_categories(kats)
+    for serie, name in zip(ch2.series,
+                           frakt_vorhanden + ["Bundesregierung", "Ausschuesse"]):
+        serie.graphicalProperties.solidFill = PARTEIFARBEN.get(name, "9E9E9E")
     ch2.y_axis.title = "Drucksachen"
     ch2.x_axis.title = "Quartal"
     stil(ch2, "Bahnpolitische Drucksachen je Quartal", breite=26)
@@ -1176,6 +1216,8 @@ def write_excel(rows, abstimmungen=None):
                      titles_from_data=True)
         ch7.set_categories(Reference(wv, min_col=1, min_row=bil + 2,
                                      max_row=letzte_bil))
+        for serie, farbe in zip(ch7.series, ["4CAF50", "D32F2F", "FBC02D"]):
+            serie.graphicalProperties.solidFill = farbe
         ch7.x_axis.title = "Abstimmungen"
         stil(ch7, "Abstimmungsverhalten je Fraktion", hoehe=9, breite=18)
         wv.add_chart(ch7, f"A{letzte_bil + 3}")
