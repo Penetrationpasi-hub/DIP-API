@@ -116,8 +116,11 @@ THEMEN = {
     "Barrierefreiheit": ["barrierefrei", "barrierefreiheit", "mobilitätseingeschränkt"],
 }
 
-# Ab wann gesammelt wird (Beginn der 20. Wahlperiode). Anpassbar.
-DATE_START = "2021-10-26"
+# Ab wann gesammelt wird. Ueber die Umgebungsvariable DIP_DATE_START
+# uebersteuerbar, z.B. DIP_DATE_START=2005-10-18 fuer den gesamten
+# Bestand des neuen DIP. Achtung: je frueher, desto laenger laeuft die
+# Sammlung und desto groesser wird die Excel.
+DATE_START = os.getenv("DIP_DATE_START", "2021-10-26")
 
 # Nur Bundestags-Drucksachen (BT), keine Bundesrats-Drucksachen (BR)
 ZUORDNUNG = "BT"
@@ -949,6 +952,20 @@ def write_excel(rows, abstimmungen=None):
     stil(ch1, "Eigene Initiativen je Fraktion, nach Drucksachentyp")
     wi.add_chart(ch1, f"A{sumrow + 3}")
 
+    # 1b) Initiativen: Torte, Anteil der Fraktionen am Gesamtaufkommen
+    ch1b = PieChart()
+    ch1b.add_data(Reference(wi, min_col=n_typ + 3,
+                            min_row=4, max_row=sumrow - 1),
+                  titles_from_data=True)
+    ch1b.set_categories(Reference(wi, min_col=1, min_row=5,
+                                  max_row=sumrow - 1))
+    ch1b.dataLabels = DataLabelList()
+    ch1b.dataLabels.showPercent = True
+    ch1b.dataLabels.showCatName = True
+    stil(ch1b, "Anteil der Fraktionen an allen Initiativen",
+         hoehe=10, breite=15)
+    wi.add_chart(ch1b, f"A{sumrow + 24}")
+
     # 2) Zeitverlauf: gestapelte Saeulen je Quartal + Linie Gesamt
     letzte_q = len(quartale) + 3
     ch2 = BarChart()
@@ -1169,6 +1186,49 @@ def write_excel(rows, abstimmungen=None):
     wb.save(XLSX_PATH)
 
 
+# ---------------------------------------------------------------- Sondierung
+
+def sondiere(client) -> int:
+    """Prueft empirisch, wie weit der Bestand zurueckreicht.
+
+    Fragt je Wahlperiode und Suchbegriff nur die Trefferzahl ab (numFound),
+    laedt also keine Dokumente. Damit sieht man ohne Ratespiel, ab welcher
+    Wahlperiode die API ueberhaupt Daten liefert.
+    """
+    print("\nSondierung: Treffer je Wahlperiode (nur Zaehlung, kein Abruf)")
+    print("-" * 60)
+    gesamt = {}
+    for wp in range(12, 22):
+        summe = 0
+        fehler = False
+        for kw in KEYWORDS:
+            try:
+                resp = client.session.get(
+                    f"{BASE_URL}/drucksache",
+                    params={"f.titel": kw, "f.zuordnung": ZUORDNUNG,
+                            "f.wahlperiode": wp},
+                    timeout=30)
+                if resp.status_code != 200:
+                    fehler = True
+                    break
+                summe += resp.json().get("numFound", 0)
+            except Exception:
+                fehler = True
+                break
+            _time.sleep(SLEEP_BETWEEN_CALLS)
+        gesamt[wp] = None if fehler else summe
+        anzeige = "Abruf fehlgeschlagen" if fehler else f"{summe} Treffer"
+        print(f"  Wahlperiode {wp}: {anzeige}")
+    vorhanden = [wp for wp, v in gesamt.items() if v]
+    if vorhanden:
+        print(f"\nDaten vorhanden ab Wahlperiode {min(vorhanden)}.")
+        print("Zum Sammeln DIP_DATE_START entsprechend setzen, z.B.:")
+        print("  DIP_DATE_START=2005-10-18 python bahnpolitik_dip.py")
+    else:
+        print("\nKeine Treffer - Suchbegriffe oder API-Key pruefen.")
+    return 0
+
+
 # ---------------------------------------------------------------- Ablauf
 
 def main() -> int:
@@ -1183,6 +1243,11 @@ def main() -> int:
     print(f"API-Key geladen: {len(key)} Zeichen")
 
     client = DipClient(key)
+
+    if "--sondierung" in sys.argv:
+        return sondiere(client)
+
+    print(f"Sammle ab {DATE_START}.")
     gefunden = {}
     for kw in KEYWORDS:
         docs = client.drucksachen(kw)
