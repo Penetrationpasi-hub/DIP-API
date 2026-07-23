@@ -951,7 +951,8 @@ def write_excel(rows, abstimmungen=None):
         wd.column_dimensions[sp].width = 14
 
     # ------------------------------------------------ Diagramme
-    from openpyxl.chart import BarChart, LineChart, PieChart, Reference
+    from openpyxl.chart import (BarChart, LineChart, PieChart,
+                                RadarChart, Reference)
     from openpyxl.chart.label import DataLabelList
     from openpyxl.chart.marker import DataPoint
 
@@ -1221,6 +1222,126 @@ def write_excel(rows, abstimmungen=None):
         ch7.x_axis.title = "Abstimmungen"
         stil(ch7, "Abstimmungsverhalten je Fraktion", hoehe=9, breite=18)
         wv.add_chart(ch7, f"A{letzte_bil + 3}")
+
+    # ------------------------------------------------ Blatt 7: Profil
+    wp_ = wb.create_sheet("Profil")
+    wp_["A1"] = "Fraktionsprofil: vier messbare Dimensionen"
+    wp_["A1"].font = Font(name=ARIAL, bold=True, size=13, color=BLAU)
+    wp_["A2"] = ("Achtung Interpretation: Das sind Aktivitaetsmasse, kein "
+                 "Qualitaetsurteil. Ob eine Anfrage sachkundig oder blosse "
+                 "Symbolpolitik ist, steht in DIP nicht drin und laesst sich "
+                 "aus Metadaten nicht ableiten. Ausserdem koennen "
+                 "Regierungsfraktionen strukturell kaum Kleine Anfragen "
+                 "stellen - niedrige Werte heissen dort nicht Untaetigkeit.")
+    wp_["A2"].font = Font(name=ARIAL, size=9, italic=True, color="9C0006")
+    wp_.merge_cells("A2:H2")
+    wp_.row_dimensions[2].height = 48
+
+    profil_frakt = frakt_mit_init or frakt_vorhanden
+    kopf(wp_, ["Kennzahl"] + profil_frakt + ["Was sie misst"], row=4)
+
+    absti = ["Antrag", "Entschließungsantrag", "Gesetzentwurf"]
+
+    # Hilfsraster rechts: Thema x Fraktion und Quartal x Fraktion, je 0/1.
+    hspalte = len(profil_frakt) + 4
+    hs = get_column_letter(hspalte)
+    wp_.cell(row=4, column=hspalte, value="Hilfsraster Themen").font = Font(
+        name=ARIAL, bold=True, size=8, color="A0A0A0")
+    for ti, th in enumerate(themenliste, start=5):
+        wp_.cell(row=ti, column=hspalte, value=th)
+        for fj, f in enumerate(profil_frakt, start=hspalte + 1):
+            sp = get_column_letter(fj)
+            wp_.cell(row=ti, column=fj, value=(
+                f"=IF(SUMPRODUCT(ISNUMBER(SEARCH(${hs}{ti},{RNG('I')}))*"
+                f"({RNG('F')}={sp}$4))>0,1,0)"))
+    th_ende = len(themenliste) + 4
+
+    q_start = th_ende + 2
+    wp_.cell(row=q_start, column=hspalte,
+             value="Hilfsraster Quartale").font = Font(
+        name=ARIAL, bold=True, size=8, color="A0A0A0")
+    for qi, q in enumerate(quartale, start=q_start + 1):
+        wp_.cell(row=qi, column=hspalte, value=q)
+        for fj, f in enumerate(profil_frakt, start=hspalte + 1):
+            sp = get_column_letter(fj)
+            wp_.cell(row=qi, column=fj, value=(
+                f"=IF(COUNTIFS({RNG('C')},${hs}{qi},{RNG('F')},{sp}$4)>0,1,0)"))
+    q_ende = q_start + len(quartale)
+
+    # Kopfzeile des Hilfsrasters mit den Fraktionsnamen
+    for fj, f in enumerate(profil_frakt, start=hspalte + 1):
+        wp_.cell(row=4, column=fj, value=f).font = Font(
+            name=ARIAL, bold=True, size=8, color="A0A0A0")
+
+    kennzahlen = [
+        ("Initiativen gesamt",
+         lambda sp, i: "+".join(
+             f"COUNTIFS({RNG('F')},{sp}$4,{RNG('E')},\"{t}\")"
+             for t in typen_vorhanden),
+         "Wie viel eine Fraktion ueberhaupt einbringt"),
+        ("davon abstimmungsfaehig",
+         lambda sp, i: "+".join(
+             f"COUNTIFS({RNG('F')},{sp}$4,{RNG('E')},\"{t}\")"
+             for t in absti if t in typen_vorhanden) or "0",
+         "Gestaltung statt blosser Kontrolle: Antraege und Gesetzentwuerfe"),
+        ("Themenbreite",
+         lambda sp, i: f"SUM({sp}$5:{sp}${th_ende})",
+         f"Wie viele der {len(themenliste)} Sachthemen beruehrt werden"),
+        ("Aktive Quartale",
+         lambda sp, i: f"SUM({sp}${q_start+1}:{sp}${q_ende})",
+         f"Beharrlichkeit: Quartale mit Aktivitaet, von {len(quartale)}"),
+    ]
+
+    for i, (name, formel, erklaerung) in enumerate(kennzahlen, start=5):
+        wp_.cell(row=i, column=1, value=name).font = Font(
+            name=ARIAL, bold=True, size=10)
+        for j, f in enumerate(profil_frakt, start=2):
+            sp = get_column_letter(hspalte + j - 1)
+            wp_.cell(row=i, column=j, value="=" + formel(sp, i))
+        c = wp_.cell(row=i, column=len(profil_frakt) + 2, value=erklaerung)
+        c.font = Font(name=ARIAL, size=9, italic=True, color="606060")
+
+    # Normierte Werte fuer das Netzdiagramm: je Kennzahl auf den
+    # Spitzenreiter bezogen, damit die Achsen vergleichbar sind.
+    norm = 11
+    wp_.cell(row=norm, column=1,
+             value="Normiert (Spitzenreiter je Zeile = 100)").font = Font(
+        name=ARIAL, bold=True, size=11, color=BLAU)
+    kopf(wp_, ["Kennzahl"] + profil_frakt, row=norm + 1)
+    letzte_f = get_column_letter(len(profil_frakt) + 1)
+    for i in range(4):
+        quelle = 5 + i
+        ziel = norm + 2 + i
+        wp_.cell(row=ziel, column=1, value=kennzahlen[i][0])
+        for j in range(2, len(profil_frakt) + 2):
+            sp = get_column_letter(j)
+            wp_.cell(row=ziel, column=j, value=(
+                f"=IFERROR(ROUND({sp}{quelle}/MAX($B${quelle}:${letzte_f}"
+                f"${quelle})*100,0),0)"))
+    norm_ende = norm + 5
+
+    breiten(wp_, {"A": 26})
+    for j in range(2, len(profil_frakt) + 2):
+        wp_.column_dimensions[get_column_letter(j)].width = 13
+    wp_.column_dimensions[get_column_letter(len(profil_frakt) + 2)].width = 52
+    for j in range(hspalte, hspalte + len(profil_frakt) + 1):
+        wp_.column_dimensions[get_column_letter(j)].hidden = True
+    arial(wp_, min_row=5)
+
+    ch8 = RadarChart()
+    ch8.type = "marker"
+    ch8.add_data(Reference(wp_, min_col=2, max_col=len(profil_frakt) + 1,
+                           min_row=norm + 1, max_row=norm_ende),
+                 titles_from_data=True)
+    ch8.set_categories(Reference(wp_, min_col=1, min_row=norm + 2,
+                                 max_row=norm_ende))
+    for serie, name in zip(ch8.series, profil_frakt):
+        serie.graphicalProperties.line.solidFill = PARTEIFARBEN.get(
+            name, "9E9E9E")
+        serie.graphicalProperties.line.width = 22000
+    stil(ch8, "Fraktionsprofil im Vergleich (100 = Spitzenwert)",
+         hoehe=11, breite=16)
+    wp_.add_chart(ch8, f"A{norm_ende + 3}")
 
     for sheet in wb.worksheets:
         sheet.sheet_view.showGridLines = False
