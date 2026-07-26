@@ -102,8 +102,19 @@ THEMEN = {
     "Puenktlichkeit/Qualitaet": ["pünktlichkeit", "puenktlichkeit",
                                  "verspätung", "qualität", "ausfall",
                                  "zugausfall", "störung"],
-    "Sicherheit": ["sicherheit", "kriminalität", "unfall", "gefährdung",
-                   "bundespolizei", "übergriff"],
+    "Kriminalitaet": ["kriminalität", "kriminalitäts", "kriminalstatistik",
+                      "straftat", "delikt", "tatverdächtig", "gewalt",
+                      "übergriff", "körperverletzung", "diebstahl", "raub",
+                      "vandalismus", "sachbeschädigung", "schmiererei",
+                      "graffiti", "messer", "waffenverbot", "sexuell",
+                      "drogen", "bundeslagebild", "schwarzfahr",
+                      "beförderungserschleichung"],
+    # "kriminalität" und "übergriff" sind bewusst nicht mehr hier, sondern
+    # im eigenen Thema Kriminalitaet. Sicherheit meint jetzt die technische
+    # und betriebliche Sicherheit plus Polizeipraesenz.
+    "Sicherheit": ["sicherheit", "unfall", "gefährdung", "bundespolizei",
+                   "sabotage", "videoüberwachung", "notruf",
+                   "gefahrenabwehr"],
     "Finanzierung": ["finanzierung", "eigenkapital", "haushalt",
                      "mittel", "milliarden", "investition", "zuschuss"],
     "Gueterverkehr": ["güterverkehr", "gueterverkehr", "schienengüter",
@@ -355,6 +366,66 @@ def kurztitel(titel: str) -> str:
                                      "a) zu dem", "- drucksache")):
             return t
     return teile[-1]
+
+
+# ------------------------------------------------- Serienerkennung
+#
+# Manche Fraktionen bringen dieselbe Anfrage in fester Taktung immer wieder
+# ein, nur mit anderem Berichtszeitraum oder anderem Bundesland. Das ist
+# weder gut noch schlecht, es ist erst einmal nur ein Muster. Damit man es
+# ueberhaupt sehen kann, wird jeder Titel auf einen Kern reduziert:
+# Zeitangaben, Zahlen, Bundeslaender und Fuellwoerter fliegen raus, uebrig
+# bleiben die beiden laengsten Inhaltswoerter. Tragen mindestens drei
+# eigene Initiativen denselben Kern, gilt das als Serie.
+
+SERIEN_MINDESTZAHL = 3
+
+_LAENDER = ["baden-württemberg", "bayern", "berlin", "brandenburg", "bremen",
+            "hamburg", "hessen", "mecklenburg-vorpommern", "niedersachsen",
+            "nordrhein-westfalen", "rheinland-pfalz", "saarland",
+            "sachsen-anhalt", "sachsen", "schleswig-holstein", "thüringen",
+            "thüringer", "hessischen", "bayerischen", "sächsischen"]
+
+_SERIEN_STOPP = {"bezug", "vergleich", "bereich", "deutschen", "deutsche",
+                 "deutschland", "aktiengesellschaft", "betreffend",
+                 "hinsichtlich", "zusammenhang", "möglichen", "weiteren",
+                 "zwischen", "bundesregierung", "sowie", "dessen", "deren",
+                 "dieser", "welche", "gegebenenfalls"}
+
+_ZEIT_RE = re.compile(
+    r"\b(erste[nrs]?|zweite[nrs]?|dritte[nrs]?|vierte[nrs]?|halbjahr|"
+    r"gesamtjahr|quartal|jahr|jahre[n]?|heute|ff)\b")
+
+
+def serien_schluessel(titel: str) -> str:
+    x = (titel or "").lower()
+    for land in _LAENDER:
+        x = x.replace(land, " ")
+    x = _ZEIT_RE.sub(" ", x)
+    x = re.sub(r"\d+", " ", x)
+    x = re.sub(r"[^a-zäöüß ]", " ", x)
+    woerter = [w for w in x.split() if len(w) > 5 and w not in _SERIEN_STOPP]
+    zwei = sorted(set(woerter), key=lambda s: (-len(s), s))[:2]
+    return " ".join(sorted(zwei))
+
+
+def serien_zuordnen(rows) -> dict:
+    """Liefert {Drucksachennummer: Seriename} fuer alle Serientreffer."""
+    haeufig = {}
+    for r in rows:
+        if r.get("typ") not in INITIATIV_TYPEN:
+            continue
+        s = serien_schluessel(r.get("titel", ""))
+        if s:
+            haeufig.setdefault(s, []).append(r)
+    zuordnung = {}
+    for s, gruppe in haeufig.items():
+        if len(gruppe) < SERIEN_MINDESTZAHL:
+            continue
+        name = " / ".join(w.capitalize() for w in s.split())
+        for r in gruppe:
+            zuordnung[r.get("dokumentnummer", "")] = name
+    return zuordnung
 
 
 # ------------------------------------------------- Abstimmungen auswerten
@@ -680,12 +751,36 @@ def write_excel(rows, abstimmungen=None):
             c.font = Font(name=ARIAL, size=10, color="0563C1", underline="single")
 
     last = len(sortiert) + 1
-    ws.auto_filter.ref = f"A1:O{last}"
+
+    # Spalte Q: Serienzugehoerigkeit, Spalte R: kam es zur Abstimmung.
+    # Beide werden vom Blatt Bewertung ausgewertet.
+    serien = serien_zuordnen(rows)
+    ws.cell(row=1, column=17, value="Serie")
+    ws.cell(row=1, column=17).font = h_font
+    ws.cell(row=1, column=17).fill = h_fill
+    ws.cell(row=1, column=17).alignment = Alignment(
+        horizontal="center", vertical="center", wrap_text=True)
+    ws.cell(row=1, column=18, value="Abgestimmt")
+    ws.cell(row=1, column=18).font = Font(
+        name=ARIAL, bold=True, size=9, color="808080")
+    for i, r in enumerate(sortiert, start=2):
+        ws.cell(row=i, column=17,
+                value=serien.get(r.get("dokumentnummer", ""), ""))
+        # Nur echte Sachentscheidungen. Eine Ueberweisung in den Ausschuss
+        # ist noch kein Votum ueber den Inhalt.
+        ws.cell(row=i, column=18, value=(
+            f"=IF(COUNTIF(Abstimmungen!$B$5:$B$2000,D{i})"
+            f"-COUNTIFS(Abstimmungen!$B$5:$B$2000,D{i},"
+            f"Abstimmungen!$D$5:$D$2000,\"*berweisung*\")>0,1,0)"))
+    ws.column_dimensions["Q"].width = 26
+    ws.column_dimensions["R"].width = 11
+
+    ws.auto_filter.ref = f"A1:Q{last}"
     ws.freeze_panes = "E2"
     breiten(ws, {"A": 11, "B": 7, "C": 10, "D": 10, "E": 26, "F": 17,
                  "G": 19, "H": 5, "I": 34, "J": 11, "K": 13, "L": 11,
                  "M": 70, "N": 34, "O": 6})
-    for row in ws.iter_rows(min_row=2, max_row=last, min_col=1, max_col=15):
+    for row in ws.iter_rows(min_row=2, max_row=last, min_col=1, max_col=18):
         for c in row:
             if c.font.name != ARIAL:
                 c.font = Font(name=ARIAL, size=10)
@@ -815,6 +910,82 @@ def write_excel(rows, abstimmungen=None):
     for j in range(2, len(jahre) + 4):
         wt.column_dimensions[get_column_letter(j)].width = 13
     arial(wt, min_row=5)
+
+    # ---- Block 2: welche Fraktion bringt welches Thema ein ----------
+    # Gezaehlt werden nur eigene Initiativen. Antworten der Regierung und
+    # Beschlussempfehlungen haben keinen Urheber im politischen Sinn und
+    # wuerden die Zuordnung verfaelschen.
+    letzte_th = len(themenliste) + 4
+
+    # Hilfsbereich rechts, ausgeblendet: die als Initiative gewerteten
+    # Drucksachentypen. Als Bereich noetig, weil COUNTIF keine Liste
+    # direkt in der Formel akzeptiert.
+    hsp = max(len(jahre), len(frakt_vorhanden)) + 5
+    hsl = get_column_letter(hsp)
+    wt.cell(row=4, column=hsp, value="Hilfsbereich Initiativtypen").font = Font(
+        name=ARIAL, bold=True, size=8, color="A0A0A0")
+    for k, t in enumerate(typen_vorhanden, start=5):
+        wt.cell(row=k, column=hsp, value=t).font = Font(
+            name=ARIAL, size=8, color="A0A0A0")
+    h_bereich = f"Themen!${hsl}$5:${hsl}${4 + len(typen_vorhanden)}"
+    wt.column_dimensions[hsl].hidden = True
+
+    tf_titel = letzte_th + 3
+    wt.cell(row=tf_titel, column=1,
+            value="Welche Fraktion bringt welches Thema ein").font = Font(
+        name=ARIAL, bold=True, size=13, color=BLAU)
+    wt.cell(row=tf_titel + 1, column=1, value=(
+        "Nur eigene Initiativen: " + ", ".join(typen_vorhanden) + ". "
+        "Antworten der Bundesregierung und Beschlussempfehlungen der "
+        "Ausschuesse bleiben aussen vor, sie haben keinen politischen "
+        "Urheber. Mehrfachnennung moeglich, eine Drucksache kann mehrere "
+        "Themen tragen. Die Spalte Schwerpunkt nennt bei Gleichstand die "
+        "in der Kopfzeile zuerst stehende Fraktion.")).font = Font(
+        name=ARIAL, size=9, italic=True)
+    wt.merge_cells(start_row=tf_titel + 1, start_column=1,
+                   end_row=tf_titel + 1, end_column=len(frakt_vorhanden) + 3)
+    wt.row_dimensions[tf_titel + 1].height = 28
+
+    tf_kopf = tf_titel + 3
+    kopf(wt, ["Thema"] + frakt_vorhanden + ["Initiativen gesamt",
+                                            "Schwerpunkt bei"], row=tf_kopf)
+    tf_erste = tf_kopf + 1
+    tf_letzte = tf_kopf + len(themenliste)
+    fr_erste = get_column_letter(2)
+    fr_letzte = get_column_letter(len(frakt_vorhanden) + 1)
+    sp_gesamt = get_column_letter(len(frakt_vorhanden) + 2)
+
+    for i, th in enumerate(themenliste, start=tf_erste):
+        wt.cell(row=i, column=1, value=th)
+        for j, f in enumerate(frakt_vorhanden, start=2):
+            sp = get_column_letter(j)
+            wt.cell(row=i, column=j, value=(
+                f"=SUMPRODUCT(ISNUMBER(SEARCH($A{i},{RNG('I')}))*"
+                f"({RNG('F')}={sp}${tf_kopf})*"
+                f"(COUNTIF({h_bereich},{RNG('E')})>0))"))
+        wt.cell(row=i, column=len(frakt_vorhanden) + 2,
+                value=f"=SUM({fr_erste}{i}:{fr_letzte}{i})")
+        # Bei Gleichstand nennt INDEX/MATCH die erste Fraktion der Zeile.
+        wt.cell(row=i, column=len(frakt_vorhanden) + 3, value=(
+            f"=IF({sp_gesamt}{i}=0,\"\","
+            f"INDEX(${fr_erste}${tf_kopf}:${fr_letzte}${tf_kopf},"
+            f"MATCH(MAX({fr_erste}{i}:{fr_letzte}{i}),"
+            f"{fr_erste}{i}:{fr_letzte}{i},0)))"))
+
+    tf_summe = tf_letzte + 1
+    wt.cell(row=tf_summe, column=1, value="Nennungen gesamt")
+    for j in range(2, len(frakt_vorhanden) + 3):
+        sp = get_column_letter(j)
+        wt.cell(row=tf_summe, column=j,
+                value=f"=SUM({sp}{tf_erste}:{sp}{tf_letzte})")
+    for c in wt[tf_summe]:
+        c.font = Font(name=ARIAL, bold=True, size=10)
+        c.fill = PatternFill("solid", start_color=HELLBLAU)
+
+    for j in range(2, len(frakt_vorhanden) + 3):
+        wt.column_dimensions[get_column_letter(j)].width = 15
+    wt.column_dimensions[get_column_letter(len(frakt_vorhanden) + 3)].width = 20
+    arial(wt, min_row=tf_erste)
 
     # ------------------------------------------------ Blatt 5: Antwortzeiten
     wa = wb.create_sheet("Antwortzeiten")
@@ -953,14 +1124,63 @@ def write_excel(rows, abstimmungen=None):
     # ------------------------------------------------ Diagramme
     from openpyxl.chart import (BarChart, LineChart, PieChart,
                                 RadarChart, Reference)
+    from openpyxl.chart.data_source import AxDataSource, StrRef
     from openpyxl.chart.label import DataLabelList
     from openpyxl.chart.marker import DataPoint
+    from openpyxl.chart.text import RichText
+    from openpyxl.drawing.text import (CharacterProperties, Paragraph,
+                                       ParagraphProperties,
+                                       RichTextProperties)
 
     def stil(ch, titel, hoehe=9.5, breite=20):
         ch.title = titel
         ch.height = hoehe
         ch.width = breite
         ch.style = 2
+        if not hasattr(ch, "x_axis"):        # Tortendiagramm, keine Achsen
+            return ch
+        # Beide Achsen erzwingen. Ohne delete=False blendet Excel eine
+        # Achse aus, sobald openpyxl kein explizites Flag schreibt.
+        ch.x_axis.delete = False
+        ch.y_axis.delete = False
+        ch.x_axis.tickLblPos = "nextTo"
+        ch.y_axis.tickLblPos = "nextTo"
+        ch.x_axis.majorTickMark = "out"
+        # openpyxl setzt die Kategorienachse per Default nach links, auch
+        # bei Saeulendiagrammen. Dort gehoert sie nach unten.
+        if isinstance(ch, BarChart):
+            waagerecht = getattr(ch, "type", "col") == "bar"
+            ch.x_axis.axPos = "l" if waagerecht else "b"
+            ch.y_axis.axPos = "b" if waagerecht else "l"
+        elif isinstance(ch, LineChart):
+            ch.x_axis.axPos = "b"
+            ch.y_axis.axPos = "l"
+        return ch
+
+    def kats(ch, ref):
+        """Textkategorien setzen (Quartale, Fraktionen, Themen).
+
+        openpyxl schreibt Kategorien grundsaetzlich als numRef, also als
+        Zahlenbezug. Stehen dort Texte wie "2025-Q1", findet Excel keine
+        Zahlen und beschriftet die Achse mit 1, 2, 3 oder gar nicht.
+        Deshalb wird die Referenz nachtraeglich auf strRef umgebogen.
+        """
+        ch.set_categories(ref)
+        for serie in ch.series:
+            if serie.cat is not None and serie.cat.numRef is not None:
+                serie.cat = AxDataSource(
+                    strRef=StrRef(f=serie.cat.numRef.f))
+        return ch
+
+    def achse_schraeg(ch, grad=-45):
+        """Kategorienbeschriftung kippen, sonst laesst Excel bei vielen
+        Quartalen jede zweite Beschriftung weg."""
+        ch.x_axis.txPr = RichText(
+            bodyPr=RichTextProperties(rot=int(grad * 60000), vert="horz"),
+            p=[Paragraph(pPr=ParagraphProperties(defRPr=CharacterProperties()),
+                         endParaRPr=CharacterProperties())])
+        ch.x_axis.tickLblSkip = 1
+        ch.x_axis.tickMarkSkip = 1
         return ch
 
     # 1) Initiativen: gestapelte Saeulen, Zusammensetzung je Fraktion
@@ -971,10 +1191,11 @@ def write_excel(rows, abstimmungen=None):
     ch1.overlap = 100
     daten = Reference(wi, min_col=3, max_col=n_typ + 2,
                       min_row=4, max_row=sumrow - 1)
-    kats = Reference(wi, min_col=1, min_row=5, max_row=sumrow - 1)
+    kat_ref = Reference(wi, min_col=1, min_row=5, max_row=sumrow - 1)
     ch1.add_data(daten, titles_from_data=True)
-    ch1.set_categories(kats)
+    kats(ch1, kat_ref)
     ch1.y_axis.title = "Drucksachen"
+    ch1.x_axis.title = "Fraktion"
     stil(ch1, "Eigene Initiativen je Fraktion, nach Drucksachentyp")
     wi.add_chart(ch1, f"A{sumrow + 3}")
 
@@ -986,8 +1207,7 @@ def write_excel(rows, abstimmungen=None):
     ch1b.add_data(Reference(wi, min_col=n_typ + 3,
                             min_row=4, max_row=ende_torte),
                   titles_from_data=True)
-    ch1b.set_categories(Reference(wi, min_col=1, min_row=5,
-                                  max_row=ende_torte))
+    kats(ch1b, Reference(wi, min_col=1, min_row=5, max_row=ende_torte))
     ch1b.dataLabels = DataLabelList()
     ch1b.dataLabels.showPercent = True
     ch1b.dataLabels.showCatName = True
@@ -1012,23 +1232,26 @@ def write_excel(rows, abstimmungen=None):
     ch2.overlap = 100
     daten = Reference(wz, min_col=2, max_col=n_f + 3,
                       min_row=3, max_row=letzte_q)
-    kats = Reference(wz, min_col=1, min_row=4, max_row=letzte_q)
+    kat_ref = Reference(wz, min_col=1, min_row=4, max_row=letzte_q)
     ch2.add_data(daten, titles_from_data=True)
-    ch2.set_categories(kats)
+    kats(ch2, kat_ref)
     for serie, name in zip(ch2.series,
                            frakt_vorhanden + ["Bundesregierung", "Ausschuesse"]):
         serie.graphicalProperties.solidFill = PARTEIFARBEN.get(name, "9E9E9E")
     ch2.y_axis.title = "Drucksachen"
     ch2.x_axis.title = "Quartal"
     stil(ch2, "Bahnpolitische Drucksachen je Quartal", breite=26)
+    achse_schraeg(ch2)
     wz.add_chart(ch2, f"A{letzte_q + 3}")
 
     ch2b = LineChart()
     daten = Reference(wz, min_col=n_f + 4, min_row=3, max_row=letzte_q)
     ch2b.add_data(daten, titles_from_data=True)
-    ch2b.set_categories(kats)
+    kats(ch2b, kat_ref)
     ch2b.y_axis.title = "Drucksachen"
+    ch2b.x_axis.title = "Quartal"
     stil(ch2b, "Gesamtaufkommen im Zeitverlauf", hoehe=7.5, breite=26)
+    achse_schraeg(ch2b)
     wz.add_chart(ch2b, f"A{letzte_q + 23}")
 
     # 3) Themen: waagerechte Balken, Rangfolge
@@ -1038,12 +1261,28 @@ def write_excel(rows, abstimmungen=None):
     ch3.grouping = "clustered"
     daten = Reference(wt, min_col=len(jahre) + 2, max_col=len(jahre) + 3,
                       min_row=4, max_row=letzte_th)
-    kats = Reference(wt, min_col=1, min_row=5, max_row=letzte_th)
+    kat_ref = Reference(wt, min_col=1, min_row=5, max_row=letzte_th)
     ch3.add_data(daten, titles_from_data=True)
-    ch3.set_categories(kats)
-    ch3.x_axis.title = "Nennungen"
+    kats(ch3, kat_ref)
+    ch3.y_axis.title = "Nennungen"
     stil(ch3, "Themen insgesamt und Anteil der Opposition", hoehe=11)
-    wt.add_chart(ch3, f"A{letzte_th + 3}")
+    wt.add_chart(ch3, f"A{tf_summe + 3}")
+
+    # 3b) Themen nach Fraktion: gestapelte waagerechte Balken
+    ch3b = BarChart()
+    ch3b.type = "bar"
+    ch3b.grouping = "stacked"
+    ch3b.overlap = 100
+    ch3b.add_data(Reference(wt, min_col=2, max_col=len(frakt_vorhanden) + 1,
+                            min_row=tf_kopf, max_row=tf_letzte),
+                  titles_from_data=True)
+    kats(ch3b, Reference(wt, min_col=1, min_row=tf_erste, max_row=tf_letzte))
+    for serie, name in zip(ch3b.series, frakt_vorhanden):
+        serie.graphicalProperties.solidFill = PARTEIFARBEN.get(name, "9E9E9E")
+    ch3b.y_axis.title = "Eigene Initiativen"
+    stil(ch3b, "Themen je Fraktion, nur eigene Initiativen",
+         hoehe=11, breite=22)
+    wt.add_chart(ch3b, f"A{tf_summe + 26}")
 
     # 4) Antwortzeiten: Spannweite je Fraktion
     letzte_aw = len(frakt_vorhanden) + 4
@@ -1051,10 +1290,11 @@ def write_excel(rows, abstimmungen=None):
     ch4.type = "col"
     ch4.grouping = "clustered"
     daten = Reference(wa, min_col=3, max_col=5, min_row=4, max_row=letzte_aw)
-    kats = Reference(wa, min_col=1, min_row=5, max_row=letzte_aw)
+    kat_ref = Reference(wa, min_col=1, min_row=5, max_row=letzte_aw)
     ch4.add_data(daten, titles_from_data=True)
-    ch4.set_categories(kats)
+    kats(ch4, kat_ref)
     ch4.y_axis.title = "Tage"
+    ch4.x_axis.title = "Fragende Fraktion"
     stil(ch4, "Bearbeitungsdauer Kleiner Anfragen je Fraktion")
     wa.add_chart(ch4, f"A{letzte_aw + 3}")
 
@@ -1087,8 +1327,7 @@ def write_excel(rows, abstimmungen=None):
     ch5 = PieChart()
     ch5.add_data(Reference(wd, min_col=15, min_row=hz, max_row=ende_typ),
                  titles_from_data=True)
-    ch5.set_categories(Reference(wd, min_col=14, min_row=hz + 1,
-                                 max_row=ende_typ))
+    kats(ch5, Reference(wd, min_col=14, min_row=hz + 1, max_row=ende_typ))
     ch5.dataLabels = DataLabelList()
     ch5.dataLabels.showPercent = True
     stil(ch5, "Drucksachen nach Typ", hoehe=8.5, breite=13)
@@ -1098,8 +1337,8 @@ def write_excel(rows, abstimmungen=None):
     ch6.type = "bar"
     ch6.add_data(Reference(wd, min_col=15, min_row=hz2, max_row=ende_rolle),
                  titles_from_data=True)
-    ch6.set_categories(Reference(wd, min_col=14, min_row=hz2 + 1,
-                                 max_row=ende_rolle))
+    kats(ch6, Reference(wd, min_col=14, min_row=hz2 + 1,
+                        max_row=ende_rolle))
     ch6.legend = None
     stil(ch6, "Drucksachen nach parlamentarischer Rolle",
          hoehe=8.5, breite=13)
@@ -1215,11 +1454,11 @@ def write_excel(rows, abstimmungen=None):
         ch7.add_data(Reference(wv, min_col=2, max_col=4,
                                min_row=bil + 1, max_row=letzte_bil),
                      titles_from_data=True)
-        ch7.set_categories(Reference(wv, min_col=1, min_row=bil + 2,
-                                     max_row=letzte_bil))
+        kats(ch7, Reference(wv, min_col=1, min_row=bil + 2,
+                            max_row=letzte_bil))
         for serie, farbe in zip(ch7.series, ["4CAF50", "D32F2F", "FBC02D"]):
             serie.graphicalProperties.solidFill = farbe
-        ch7.x_axis.title = "Abstimmungen"
+        ch7.y_axis.title = "Abstimmungen"
         stil(ch7, "Abstimmungsverhalten je Fraktion", hoehe=9, breite=18)
         wv.add_chart(ch7, f"A{letzte_bil + 3}")
 
@@ -1333,8 +1572,8 @@ def write_excel(rows, abstimmungen=None):
     ch8.add_data(Reference(wp_, min_col=2, max_col=len(profil_frakt) + 1,
                            min_row=norm + 1, max_row=norm_ende),
                  titles_from_data=True)
-    ch8.set_categories(Reference(wp_, min_col=1, min_row=norm + 2,
-                                 max_row=norm_ende))
+    kats(ch8, Reference(wp_, min_col=1, min_row=norm + 2,
+                        max_row=norm_ende))
     for serie, name in zip(ch8.series, profil_frakt):
         serie.graphicalProperties.line.solidFill = PARTEIFARBEN.get(
             name, "9E9E9E")
@@ -1342,6 +1581,254 @@ def write_excel(rows, abstimmungen=None):
     stil(ch8, "Fraktionsprofil im Vergleich (100 = Spitzenwert)",
          hoehe=11, breite=16)
     wp_.add_chart(ch8, f"A{norm_ende + 3}")
+
+    # ------------------------------------------------ Blatt 8: Bewertung
+    #
+    # Hier wird bewusst gewertet. Der Punkt ist nicht, die Wertung zu
+    # vermeiden, sondern sie sichtbar zu machen: die Gewichte stehen in
+    # gelben Zellen und koennen geaendert werden, der Score ist eine
+    # Formel und rechnet sich sofort neu. Wer die Gewichte anders setzt,
+    # bekommt ein anderes Ergebnis, und genau das ist der Sinn.
+    wb_ = wb.create_sheet("Bewertung")
+    wb_["A1"] = "Bewertung: wem ist die Schiene wichtig"
+    wb_["A1"].font = Font(name=ARIAL, bold=True, size=13, color=BLAU)
+    wb_["A2"] = (
+        "Zwei Verzerrungen, die dieses Blatt NICHT herausrechnen kann. "
+        "Erstens: Oppositionsfraktionen koennen keine Gesetze durchbringen, "
+        "fuer sie ist der abgelehnte Antrag oft das einzige verfuegbare "
+        "Mittel. Zweitens: Regierungsfraktionen brauchen gar keine "
+        "Antraege, sie machen Politik ueber das Ministerium und sind in "
+        "DIP deshalb strukturell unsichtbar. Ein niedriger Wert heisst "
+        "dort nicht Desinteresse. Vergleiche deshalb nur innerhalb "
+        "derselben Rolle, die Spalte steht unten dabei.")
+    wb_["A2"].font = Font(name=ARIAL, size=9, italic=True, color="9C0006")
+    wb_.merge_cells(start_row=2, start_column=1,
+                    end_row=2, end_column=len(profil_frakt) + 3)
+    wb_.row_dimensions[2].height = 62
+
+    bew_frakt = profil_frakt
+    n_bf = len(bew_frakt)
+    sp_letzte = get_column_letter(n_bf + 2)
+
+    # ---- Schritt 1: Zaehlungen ----
+    wb_["A4"] = "Schritt 1: gezaehlt, ohne Wertung"
+    wb_["A4"].font = Font(name=ARIAL, bold=True, size=11, color=BLAU)
+    kopf(wb_, ["Zaehlung"] + bew_frakt + ["Bezugsgroesse"], row=5)
+
+    z_init, z_gest, z_abst, z_serie, z_wahl, z_thema, z_quartal = range(6, 13)
+
+    def counts(sp, typen, extra=""):
+        """Summe von COUNTIFS ueber mehrere Drucksachentypen."""
+        return "+".join(
+            f"COUNTIFS({RNG('F')},{sp}$5,{RNG('E')},\"{t}\"{extra})"
+            for t in typen) or "0"
+
+    absti_vorh = [t for t in absti if t in typen_vorhanden]
+
+    # Halbjahr vor einer Bundestagswahl. Nur Termine, die im Bestand
+    # ueberhaupt vorkommen, alles andere waere Rechnen mit Nullen.
+    wahltermine = [d for d in ("2021-09-26", "2025-02-23")
+                   if any((r.get("datum") or "") <= d for r in rows)]
+
+    def wahlfenster(sp):
+        teile = []
+        for d in wahltermine:
+            j, m, t = int(d[:4]), int(d[5:7]), int(d[8:10])
+            teile.append(
+                f"COUNTIFS({RNG('F')},{sp}$5,{RNG('A')},\">=\"&"
+                f"DATE({j},{m},{t})-183,{RNG('A')},\"<=\"&DATE({j},{m},{t}))")
+        return "+".join(teile) or "0"
+
+    # Hilfsraster rechts, ausgeblendet: je Thema und je Quartal eine 0/1
+    # Markierung pro Fraktion. Ohne das laesst sich Vielfalt nicht zaehlen.
+    bh = n_bf + 4
+    bhl = get_column_letter(bh)
+    wb_.cell(row=5, column=bh, value="Hilfsraster").font = Font(
+        name=ARIAL, bold=True, size=8, color="A0A0A0")
+    for fj, f in enumerate(bew_frakt, start=bh + 1):
+        wb_.cell(row=5, column=fj, value=f).font = Font(
+            name=ARIAL, bold=True, size=8, color="A0A0A0")
+    for ti, th in enumerate(themenliste, start=6):
+        wb_.cell(row=ti, column=bh, value=th)
+        for fj, f in enumerate(bew_frakt, start=bh + 1):
+            sp = get_column_letter(fj)
+            wb_.cell(row=ti, column=fj, value=(
+                f"=IF(SUMPRODUCT(ISNUMBER(SEARCH(${bhl}{ti},{RNG('I')}))*"
+                f"({RNG('F')}={sp}$5)*(COUNTIF({h_bereich},{RNG('E')})>0))"
+                f">0,1,0)"))
+    bh_th_ende = len(themenliste) + 5
+    bq_start = bh_th_ende + 2
+    for qi, q in enumerate(quartale, start=bq_start):
+        wb_.cell(row=qi, column=bh, value=q)
+        for fj, f in enumerate(bew_frakt, start=bh + 1):
+            sp = get_column_letter(fj)
+            wb_.cell(row=qi, column=fj, value=(
+                f"=IF(COUNTIFS({RNG('C')},${bhl}{qi},{RNG('F')},{sp}$5,"
+                f"{RNG('E')},\"Kleine Anfrage\")+COUNTIFS({RNG('C')},"
+                f"${bhl}{qi},{RNG('F')},{sp}$5,{RNG('E')},\"Antrag\")>0,1,0)"))
+    bq_ende = bq_start + len(quartale) - 1
+
+    zaehlungen = [
+        (z_init, "Eigene Initiativen",
+         lambda sp: counts(sp, typen_vorhanden),
+         "Anzahl"),
+        (z_gest, "davon Antraege und Gesetzentwuerfe",
+         lambda sp: counts(sp, absti_vorh),
+         "Anzahl"),
+        (z_abst, "davon zur Abstimmung gelangt",
+         lambda sp: counts(sp, absti_vorh, f",{RNG('R')},1"),
+         "Anzahl"),
+        (z_serie, "davon Teil einer Serie",
+         lambda sp: counts(sp, typen_vorhanden, f",{RNG('Q')},\"<>\""),
+         "Anzahl"),
+        (z_wahl, "davon im Halbjahr vor einer Bundestagswahl",
+         wahlfenster,
+         f"Anzahl, {len(wahltermine)} Termin(e) im Bestand"),
+        # Diese beiden kommen aus dem Hilfsraster, nicht aus COUNTIFS.
+        (z_thema, "beruehrte Sachthemen", None, f"von {len(themenliste)}"),
+        (z_quartal, "Quartale mit eigener Aktivitaet", None,
+         f"von {len(quartale)}"),
+    ]
+
+    for zeile, name, formel, bezug in zaehlungen:
+        wb_.cell(row=zeile, column=1, value=name)
+        for j, f in enumerate(bew_frakt, start=2):
+            sp = get_column_letter(j)
+            if zeile in (z_thema, z_quartal):
+                hsp = get_column_letter(bh + j - 1)
+                grenzen = ((6, bh_th_ende) if zeile == z_thema
+                           else (bq_start, bq_ende))
+                wert = f"=SUM({hsp}${grenzen[0]}:{hsp}${grenzen[1]})"
+            else:
+                wert = "=" + formel(sp)
+            wb_.cell(row=zeile, column=j, value=wert)
+        c = wb_.cell(row=zeile, column=n_bf + 2, value=bezug)
+        c.font = Font(name=ARIAL, size=9, italic=True, color="606060")
+
+    # ---- Schritt 2: Indikatoren und Gewichte ----
+    ind_titel = z_quartal + 2
+    wb_.cell(row=ind_titel, column=1,
+             value="Schritt 2: Indikatoren, je Zeile Spitzenreiter = 100").font = Font(
+        name=ARIAL, bold=True, size=11, color=BLAU)
+    wb_.cell(row=ind_titel + 1, column=1, value=(
+        "Die gelben Zellen sind deine. Aendere die Gewichte und der Score "
+        "unten rechnet sich neu. Negative Gewichte sind erlaubt, wenn du "
+        "einen Indikator als Minuspunkt verstehst.")).font = Font(
+        name=ARIAL, size=9, italic=True)
+    wb_.merge_cells(start_row=ind_titel + 1, start_column=1,
+                    end_row=ind_titel + 1, end_column=n_bf + 3)
+
+    ind_kopf = ind_titel + 3
+    kopf(wb_, ["Indikator", "Gewicht"] + bew_frakt + ["Was er misst"],
+         row=ind_kopf)
+
+    indikatoren = [
+        ("Aktivitaet", 10, f"{{sp}}{z_init}",
+         "Menge der eigenen Initiativen. Sagt nichts ueber Gehalt"),
+        ("Gestaltungsanteil", 25,
+         f"IFERROR({{sp}}{z_gest}/{{sp}}{z_init}*100,0)",
+         "Antrag und Gesetzentwurf statt nur Nachfragen"),
+        ("Themenbreite", 20, f"{{sp}}{z_thema}",
+         "Ganze Bahnpolitik oder ein Steckenpferd. Haengt an der Menge"),
+        ("Beharrlichkeit", 15, f"{{sp}}{z_quartal}",
+         "Dauerhaft dran oder nur zu Anlaessen"),
+        ("Durchsetzungsversuch", 10,
+         f"IFERROR({{sp}}{z_abst}/{{sp}}{z_gest}*100,0)",
+         "Anteil mit Sachentscheidung, Ueberweisung zaehlt nicht"),
+        ("Eigenstaendigkeit", 10,
+         f"100-IFERROR({{sp}}{z_serie}/{{sp}}{z_init}*100,0)",
+         "Gegenteil von Serienanfragen im festen Takt"),
+        ("Unabhaengigkeit vom Wahltermin", 10,
+         f"100-IFERROR({{sp}}{z_wahl}/{{sp}}{z_init}*100,0)",
+         "Arbeitet auch fern vom Wahlkampf"),
+    ]
+
+    ind_erste = ind_kopf + 1
+    for k, (name, gew, roh, erkl) in enumerate(indikatoren):
+        i = ind_erste + k
+        wb_.cell(row=i, column=1, value=name)
+        g = wb_.cell(row=i, column=2, value=gew)
+        g.fill = PatternFill("solid", start_color="FFFF00")
+        g.font = Font(name=ARIAL, size=10, bold=True, color="0000FF")
+        g.number_format = "0"
+        for j, f in enumerate(bew_frakt, start=3):
+            sp = get_column_letter(j - 1)   # Spalte im Zaehlblock
+            ziel = get_column_letter(j)
+            rohwert = roh.format(sp=sp)
+            wb_.cell(row=i, column=j, value=(
+                f"=IFERROR(ROUND(({rohwert})/MAX("
+                + ",".join(
+                    roh.format(sp=get_column_letter(x))
+                    for x in range(2, n_bf + 2))
+                + f")*100,0),0)"))
+        c = wb_.cell(row=i, column=n_bf + 3, value=erkl)
+        c.font = Font(name=ARIAL, size=9, italic=True, color="606060")
+    ind_letzte = ind_erste + len(indikatoren) - 1
+
+    gsum = ind_letzte + 1
+    wb_.cell(row=gsum, column=1, value="Summe der Gewichte")
+    wb_.cell(row=gsum, column=2, value=f"=SUM(B{ind_erste}:B{ind_letzte})")
+    for c in wb_[gsum][:2]:
+        c.font = Font(name=ARIAL, bold=True, size=10)
+
+    # ---- Schritt 3: Score ----
+    sc_titel = gsum + 2
+    wb_.cell(row=sc_titel, column=1, value="Schritt 3: Ergebnis").font = Font(
+        name=ARIAL, bold=True, size=11, color=BLAU)
+    sc_kopf = sc_titel + 1
+    kopf(wb_, ["Fraktion", "Score", "Rolle ab WP 21", "Initiativen gesamt",
+               "Belastbarkeit"], row=sc_kopf)
+    for k, f in enumerate(bew_frakt):
+        i = sc_kopf + 1 + k
+        sp = get_column_letter(k + 3)      # Spalte im Indikatorblock
+        wb_.cell(row=i, column=1, value=f)
+        wb_.cell(row=i, column=2, value=(
+            f"=IFERROR(SUMPRODUCT($B${ind_erste}:$B${ind_letzte},"
+            f"{sp}${ind_erste}:{sp}${ind_letzte})/"
+            f"SUMPRODUCT(ABS($B${ind_erste}:$B${ind_letzte})),0)"))
+        wb_.cell(row=i, column=2).number_format = "0.0"
+        wb_.cell(row=i, column=3,
+                 value=("Regierungsfraktion"
+                        if f in REGIERUNGSFRAKTIONEN["21"]
+                        else ("Fraktionsuebergreifend"
+                              if f == "Mehrere Fraktionen" else "Opposition")))
+        zsp = get_column_letter(k + 2)
+        wb_.cell(row=i, column=4, value=f"={zsp}{z_init}")
+        wb_.cell(row=i, column=5, value=(
+            f"=IF(D{i}<10,\"zu duenn fuer eine Aussage\","
+            f"IF(D{i}<25,\"schmale Basis\",\"belastbar\"))"))
+    sc_letzte = sc_kopf + len(bew_frakt)
+
+    wb_.cell(row=sc_letzte + 2, column=1, value=(
+        "Der Score ist relativ, nicht absolut: 100 heisst nur, dass eine "
+        "Fraktion in allen Indikatoren die beste der hier verglichenen ist. "
+        "Er sagt nichts darueber, ob das objektiv viel oder wenig ist.")
+    ).font = Font(name=ARIAL, size=9, italic=True, color="606060")
+    wb_.merge_cells(start_row=sc_letzte + 2, start_column=1,
+                    end_row=sc_letzte + 2, end_column=n_bf + 3)
+
+    breiten(wb_, {"A": 38, "B": 11})
+    for j in range(3, n_bf + 3):
+        wb_.column_dimensions[get_column_letter(j)].width = 14
+    wb_.column_dimensions[get_column_letter(n_bf + 3)].width = 46
+    for j in range(bh, bh + n_bf + 1):
+        wb_.column_dimensions[get_column_letter(j)].hidden = True
+    arial(wb_, min_row=6)
+
+    ch9 = BarChart()
+    ch9.type = "col"
+    ch9.add_data(Reference(wb_, min_col=2, min_row=sc_kopf,
+                           max_row=sc_letzte), titles_from_data=True)
+    kats(ch9, Reference(wb_, min_col=1, min_row=sc_kopf + 1,
+                        max_row=sc_letzte))
+    ch9.legend = None
+    for idx, f in enumerate(bew_frakt):
+        pt = DataPoint(idx=idx)
+        pt.graphicalProperties.solidFill = PARTEIFARBEN.get(f, "9E9E9E")
+        ch9.series[0].data_points.append(pt)
+    ch9.y_axis.title = "Score"
+    stil(ch9, "Score bei den aktuell gesetzten Gewichten", hoehe=9, breite=16)
+    wb_.add_chart(ch9, f"A{sc_letzte + 5}")
 
     for sheet in wb.worksheets:
         sheet.sheet_view.showGridLines = False
